@@ -1,7 +1,6 @@
 # Analyzer Details
 deviceName:     SR785
-ipAddress:      vanna     ## Ip or hostname of GPIB Device
-gpibAddress:    10        ## port of GPIB device (10) is default 
+serial:        /dev/ttyUSB0     ## serial port of Device
 
 # Output Parameters
 saveDir:        ./        ## Path where output is saved, use [./] for current dir
