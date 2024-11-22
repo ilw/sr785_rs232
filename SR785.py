@@ -1,60 +1,106 @@
-# This module provides data access to SR785 analyzer
-# Standard Library imports
 import re
 import sys
 from math import floor
 import time
-# Required custom libraries
-import netgpib
+import serial
 import termstatus
 
-
 ####################
-# GPIB
+# RS232
 ####################
 
+def connectRS232(port, baudrate=9600, timeout=1):
+    """
+    Connect to SR785 via RS232 serial port
+    
+    Args:
+        port (str): COM port name (e.g., 'COM3' or '/dev/ttyUSB0')
+        baudrate (int): Baud rate for communication (default 9600)
+        timeout (float): Communication timeout in seconds
+    
+    Returns:
+        serial.Serial: Configured serial connection object
+    """
+    print(f'Connecting to {port} at {baudrate} baud...')
+    try:
+        ser = serial.Serial(
+            port=port, 
+            baudrate=baudrate, 
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=timeout
+        )
+        print('Connected.')
+        
+        # Clear any existing buffer
+        ser.reset_input_buffer()
+        ser.reset_output_buffer()
+        
+        # Send simple query to verify communication
+        ser.write(b"*IDN?\n")
+        idnResponse = ser.readline().decode('ascii').strip()
+        print("Instrument ID:", idnResponse)
+        
+        return ser
+    except serial.SerialException as e:
+        print(f"Error connecting to serial port: {e}")
+        raise
 
-def connectGPIB(ipAddress,gpibAddress):
-    print('Connecting to '+str(ipAddress)+':'+str(gpibAddress)+'...')
-    gpibObj=netgpib.netGPIB(ipAddress, gpibAddress, '\004',0)
-    print('Connected.')
-    #Set output to GPIB
-    gpibObj.command("OUTX0")
-    # Print IDN
-    print("Instrument ID: ")
-    idnString=gpibObj.query("*IDN?")
-    print(idnString.splitlines()[-1])
+def send_command(ser, command):
+    """
+    Send a command to the SR785
+    
+    Args:
+        ser (serial.Serial): Serial connection object
+        command (str): Command to send
+    """
+    full_command = command + "\n"
+    ser.write(full_command.encode('ascii'))
     time.sleep(0.1)
-    return(gpibObj)
 
+def query(ser, command):
+    """
+    Send a query and read the response
+    
+    Args:
+        ser (serial.Serial): Serial connection object
+        command (str): Query to send
+    
+    Returns:
+        str: Response from the instrument
+    """
+    send_command(ser, command)
+    response = ser.readline().decode('ascii').strip()
+    return response
 
-####################
-# Settings helpers
-####################
+# Most other functions from the original script remain the same
+# Just replace send_command(ser,) with send_command(ser, )
+# and query(ser,) with query(ser, )
 
-def reset(gpibObj):
-    # Call reset command, manual states it takes 12 sec to finish
+def reset(ser):
+    """Reset the SR785 instrument"""
     print('Resetting SR785...')
-    gpibObj.command("*RST")
+    send_command(ser, "*RST")
     time.sleep(12)
     print('Done!')
 
-
-def psdOff(gpibObj):
-    # Ensure that PSD units are off, since it can get stuck in swept sine mode
-    while gpibObj.query('PSDU?0')[0] =='1' or gpibObj.query('PSDU?1')[0] == '1':
-        mGrp = gpibObj.query('MGRP?0')
-        meas0 = gpibObj.query('MEAS?0')
-        meas1 = gpibObj.query('MEAS?1')
-        gpibObj.command('MGRP2,0')
-        gpibObj.command('MEAS0,0')
-        gpibObj.command('MEAS0,1')
-        gpibObj.command('PSDU0,0')
-        gpibObj.command('PSDU1,0')
+def psdOff(ser):
+    """Ensure PSD units are off"""
+    while query(ser, 'PSDU?0')[0] == '1' or query(ser, 'PSDU?1')[0] == '1':
+        mGrp = query(ser, 'MGRP?0')
+        meas0 = query(ser, 'MEAS?0')
+        meas1 = query(ser, 'MEAS?1')
+        send_command(ser, 'MGRP2,0')
+        send_command(ser, 'MEAS0,0')
+        send_command(ser, 'MEAS0,1')
+        send_command(ser, 'PSDU0,0')
+        send_command(ser, 'PSDU1,0')
         time.sleep(.5)
-        gpibObj.command('MGRP2,'+mGrp.split('\n')[0])
-        gpibObj.command('MEAS0,'+meas0.split('\n')[0])
-        gpibObj.command('MEAS1,'+meas1.split('\n')[0])
+        send_command(ser, f'MGRP2,{mGrp.split()[0]}')
+        send_command(ser, f'MEAS0,{meas0.split()[0]}')
+        send_command(ser, f'MEAS1,{meas1.split()[0]}')
+
 
 
 ####################
@@ -62,21 +108,21 @@ def psdOff(gpibObj):
 ####################
 
 
-def getdata(gpibObj, dataFile, paramFile):
+def getdata(ser, dataFile, paramFile):
     # For compatibility with old netgpibdata
     timeStamp = time.strftime('%b %d %Y - %H:%M:%S', time.localtime())
-    gpibObj.command("OUTX0")
+    send_command(ser,"OUTX0")
     time.sleep(0.1)
-    (freq,data)=download(gpibObj)
+    (freq,data)=download(ser)
     writeHeader(dataFile, timeStamp)
     writeData(dataFile, freq, data, delimiter=', ')
 
 
-def getparam(gpibObj, fileRoot, dataFile, paramFile):
+def getparam(ser, fileRoot, dataFile, paramFile):
     # For compatibility with old netgpibdata
     timeStamp = time.strftime('%b %d %Y - %H:%M:%S', time.localtime())
     writeHeader(paramFile, timeStamp)
-    writeParams(gpibObj, paramFile)
+    writeParams(ser, paramFile)
 
 
 ####################
@@ -84,28 +130,28 @@ def getparam(gpibObj, fileRoot, dataFile, paramFile):
 ####################
 
 
-def download(gpibObj):
+def download(ser):
     data=list()
     freq=list()
-    if gpibObj.query('DFMT?')[0] != '0': # Dual channel, or overlay
+    if query(ser,'DFMT?')[0] != '0': # Dual channel, or overlay
         for disp in range(2):
             print('Downloading data from display #'+str(disp))
-            (f,d)=downloadDisplay(gpibObj, disp)
+            (f,d)=downloadDisplay(ser, disp)
             freq.append(f[:-1])
             data.append(d[:-1])
     else:
-        active = int(gpibObj.query('ACTD?')[0])
+        active = int(query(ser,'ACTD?')[0])
         print('Downloading data from display #'+str(active))
-        (f,d)=downloadDisplay(gpibObj, active)
+        (f,d)=downloadDisplay(ser, active)
         freq.append(f[:-1])
         data.append(d[:-1])
 
     return(freq, data)
 
 
-def downloadDisplay(gpibObj, disp):
+def downloadDisplay(ser, disp):
     #Get the number of points on the Display
-    numPoint = int(gpibObj.query('DSPN?'+str(disp),100))
+    numPoint = int(query(ser,'DSPN?'+str(disp),100))
     freq=[]
     data=[]
     accomplished=0
@@ -120,9 +166,9 @@ def downloadDisplay(gpibObj, disp):
             accomplished = percent
             pass
 
-        f=gpibObj.query("DBIN?"+str(disp)+","+str(bin),100)
+        f=query(ser,"DBIN?"+str(disp)+","+str(bin),100)
         f=f[:-1] #Chop new line character
-        d=gpibObj.query("DSPY?"+str(disp)+","+str(bin),100)
+        d=query(ser,"DSPY?"+str(disp)+","+str(bin),100)
         d=d[:-1] #Chop new line character
         freq.append(f)
         data.append(d)
@@ -170,10 +216,10 @@ def writeData(dataFile, freq, data, delimiter='    '):
 ####################
 
 
-def measure(gpibObj, measType):
+def measure(ser, measType):
     #Start measurement
     sys.stdout.flush()
-    gpibObj.command('STRT') #Start
+    send_command(ser,'STRT') #Start
     #Wait for the measurement to end
     measuring = True
 
@@ -181,31 +227,31 @@ def measure(gpibObj, measType):
         print('Starting ' + measType + ' measurement...')
         time.sleep(0.1)
         print('    Averages completed:')
-        avTot=int(gpibObj.query('FAVN?0'))
+        avTot=int(query(ser,'FAVN?0'))
         avgStatus=termstatus.progressBar(20,avTot)
         while measuring:
-            measuring = not int(gpibObj.query('DSPS?1'))
-            avg=int(gpibObj.query("NAVG?0"))
+            measuring = not int(query(ser,'DSPS?1'))
+            avg=int(query(ser,"NAVG?0"))
             avgStatus.update(avg)
             time.sleep(0.5)
-        avgStatus.update(int(gpibObj.query("NAVG?0")))
+        avgStatus.update(int(query(ser,"NAVG?0")))
 
-        gpibObj.command('ASCL0') #Auto scale
-        gpibObj.command('ASCL1') #Auto scale
+        send_command(ser,'ASCL0') #Auto scale
+        send_command(ser,'ASCL1') #Auto scale
 
     elif measType =='TF':
         print('Starting ' + measType + ' measurement...')
         time.sleep(1)
-        numPoints=int(gpibObj.query('SNPS?0')) #Number of points
+        numPoints=int(query(ser,'SNPS?0')) #Number of points
         progressInfo=termstatus.progressBar(20,numPoints)
         while measuring:
             #Get status
             ## Manual says we should check bit 0 as well...
-            #measuring = not (int(gpibObj.query('DSPS?4'))
-            #                 or int(gpibObj.query('DSPS?0')))
-            measuring = not int(gpibObj.query('DSPS?4'))
+            #measuring = not (int(query(ser,'DSPS?4'))
+            #                 or int(query(ser,'DSPS?0')))
+            measuring = not int(query(ser,'DSPS?4'))
             time.sleep(0.1)
-            progressInfo.update(int(gpibObj.query('SSFR?')))
+            progressInfo.update(int(query(ser,'SSFR?')))
             time.sleep(0.4)
         progressInfo.end()
 
@@ -215,15 +261,15 @@ def measure(gpibObj, measType):
 ####################
 
 
-def writeParams(gpibObj, paramFile):
+def writeParams(ser, paramFile):
     #Get measurement parameters
     print('Reading instrument parameters')
 
     #Get the display format
-    if int(gpibObj.query("DFMT?")) != '0':
+    if int(query(ser,"DFMT?")) != '0':
         dispList = range(2)
     else:
-        dispList = [int(gpibObj.query('ACTD?')[0])]
+        dispList = [int(query(ser,'ACTD?')[0])]
 
     #Get display parameters for each display
     measGrp=[]
@@ -234,7 +280,7 @@ def writeParams(gpibObj, paramFile):
     time.sleep(0.1)
 
     for disp in dispList:
-        i=int(gpibObj.query("MGRP?"+str(disp)))
+        i=int(query(ser,"MGRP?"+str(disp)))
         measGrp.append({0: 'FFT' ,
                          1: 'Correlation',
                          2: 'Octave',
@@ -243,7 +289,7 @@ def writeParams(gpibObj, paramFile):
                          5: 'Time/Histogram'}[i])
 
     #Get measurement
-        i=int(gpibObj.query("MEAS?"+str(disp)))
+        i=int(query(ser,"MEAS?"+str(disp)))
         measurement.append(
         {0: 'FFT 1',
          1: 'FFT 2',
@@ -335,7 +381,7 @@ def writeParams(gpibObj, paramFile):
          }[i])
 
         #View information
-        i=int(gpibObj.query("VIEW?"+str(disp)))
+        i=int(query(ser,"VIEW?"+str(disp)))
         view.append({0: 'Log Magnitude',
                      1: 'Linear Magnitude',
                      2: 'Magnitude Squared',
@@ -347,44 +393,44 @@ def writeParams(gpibObj, paramFile):
                      8: 'Nichols'}[i])
 
         #Units
-        result=gpibObj.query('UNIT?'+str(disp))
+        result=query(ser,'UNIT?'+str(disp))
         result=result[:-1]  # Chop a new line character
         unit.append(result.replace('\xfb','rt'))
 
     #Input Source
-    i=int(gpibObj.query("ISRC?"))
+    i=int(query(ser,"ISRC?"))
     time.sleep(0.1)
     inputSource={0: 'Analog',
                  1: 'Capture'}[i]
 
     #Input Mode
-    i=int(gpibObj.query("I1MD?"))
+    i=int(query(ser,"I1MD?"))
     CH1inputMode={0: 'Single ended',
                  1: 'Differential'}[i]
-    i=int(gpibObj.query("I2MD?"))
+    i=int(query(ser,"I2MD?"))
     CH2inputMode={0: 'Single ended',
                  1: 'Differential'}[i]
 
     #Grounding
-    i=int(gpibObj.query("I1GD?"))
+    i=int(query(ser,"I1GD?"))
     CH1Grounding={0: 'Float',
                  1: 'Grounded'}[i]
-    i=int(gpibObj.query("I2GD?"))
+    i=int(query(ser,"I2GD?"))
     CH2Grounding={0: 'Float',
                  1: 'Grounded'}[i]
 
     #Coupling
-    i=int(gpibObj.query("I1CP?"))
+    i=int(query(ser,"I1CP?"))
     CH1Coupling={0: 'DC',
                  1: 'AC',
                   2:'ICP'}[i]
-    i=int(gpibObj.query("I2CP?"))
+    i=int(query(ser,"I2CP?"))
     CH2Coupling={0: 'DC',
                  1: 'AC',
                   2:'ICP'}[i]
 
     #Input Range
-    result=gpibObj.query("I1RG?")
+    result=query(ser,"I1RG?")
     match=re.search(r'^\s*([-+\d]*),.*',result)
     CH1Range=str(float(match.group(1)))
     match=re.search(r'\d,(\d)',result)
@@ -393,7 +439,7 @@ def writeParams(gpibObj, paramFile):
                        5: 'Vrms', 6: 'dBEUpk', 7: 'dBEUpp', 8: 'dBEUrms',
                        9: 'EUpk', 10: 'EUpp', 11: 'EUrms'}[i]
 
-    result=gpibObj.query("I2RG?")
+    result=query(ser,"I2RG?")
     match=re.search(r'^\s*([-+\d]*),.*',result)
     CH2Range=str(float(match.group(1)))
     match=re.search(r'\d,(\d)',result)
@@ -403,31 +449,31 @@ def writeParams(gpibObj, paramFile):
                        9: 'EUpk', 10: 'EUpp', 11: 'EUrms'}[i]
 
     #Auto Range
-    i=int(gpibObj.query("A1RG?"))
+    i=int(query(ser,"A1RG?"))
     CH1AutoRange={0: 'Off', 1: 'On'}[i]
-    i=int(gpibObj.query("I1AR?"))
+    i=int(query(ser,"I1AR?"))
     CH1AutoRangeMode={0: 'Up Only', 1: 'Tracking'}[i]
-    i=int(gpibObj.query("A2RG?"))
+    i=int(query(ser,"A2RG?"))
     CH2AutoRange={0: 'Off', 1: 'On'}[i]
-    i=int(gpibObj.query("I2AR?"))
+    i=int(query(ser,"I2AR?"))
     CH2AutoRangeMode={0: 'Normal', 1: 'Tracking'}[i]
 
     #Anti-Aliasing Filter
-    i=int(gpibObj.query("I1AF?"))
+    i=int(query(ser,"I1AF?"))
     CH1AAFilter={0: 'Off', 1: 'On'}[i]
-    i=int(gpibObj.query("I1AF?"))
+    i=int(query(ser,"I1AF?"))
     CH2AAFilter={0: 'Off', 1: 'On'}[i]
 
     #Source type
-    i=int(gpibObj.query("STYP?"))
+    i=int(query(ser,"STYP?"))
     SrcType={0: "Sine", 1: "Chirp", 2: "Noise", 3: "Arbitrary"}[i]
 
     #Source amplitude
     if SrcType == "Sine":
         if measGrp[0] == "Swept Sine":
-            result=gpibObj.query("SSAM?")
+            result=query(ser,"SSAM?")
         else:
-            result=gpibObj.query("S1AM?")
+            result=query(ser,"S1AM?")
 
         match=re.search(r'^\s*([-+.\d]*),.*',result)
         SrcAmp=str(float(match.group(1)))
@@ -436,41 +482,41 @@ def writeParams(gpibObj, paramFile):
         SrcAmp=SrcAmp+{0: 'mVpk', 1: 'mVpp', 2: 'mVrms', 3: 'Vpk', 4: 'Vrms',
                        5: 'dBVpk', 6: 'dBVpp', 7: 'dBVrms'}[i]
     elif SrcType == "Chirp":
-        result=gpibObj.query("CAMP?")
+        result=query(ser,"CAMP?")
         match=re.search(r'^\s*([-+.\d]*),.*',result)
         SrcAmp=str(float(match.group(1)))
         match=re.search(r'\d,(\d)',result)
         i=int(match.group(1))
         SrcAmp=SrcAmp+{0: 'mV', 1: 'V', 2: 'dBVpk'}[i]
     elif SrcType == "Noise":
-        result=gpibObj.query("NAMP?")
+        result=query(ser,"NAMP?")
         match=re.search(r'^\s*([-+.\d]*),.*',result)
         SrcAmp=str(float(match.group(1)))
         match=re.search(r'\d,(\d)',result)
         i=int(match.group(1))
         SrcAmp=SrcAmp+{0: 'mV', 1: 'V', 2: 'dBVpk'}[i]
     else:
-        result=float(gpibObj.query("AAMP?"))
+        result=float(query(ser,"AAMP?"))
         SrcAmp=str(result/100)+"V"
 
-    SrcOn = gpibObj.query("SRCO?")
+    SrcOn = query(ser,"SRCO?")
 
     print("Writing to the parameter file.")
 
     paramFile.write('#---------- Measurement Setup ------------\n')
 
     if measGrp[0] == 'FFT':
-        startFreq=gpibObj.query("FSTR?0")[:-1]
-        spanFreq=gpibObj.query("FSPN?0")[:-1]
+        startFreq=query(ser,"FSTR?0")[:-1]
+        spanFreq=query(ser,"FSPN?0")[:-1]
         resDict={'0':'100', '1':'200', '2':'400', '3':'800'}
-        numOfPoints = resDict[gpibObj.query("FLIN?"+str(0))[:-1]]
-        numAvg = gpibObj.query("FAVN?0")[:-1]
+        numOfPoints = resDict[query(ser,"FLIN?"+str(0))[:-1]]
+        numAvg = query(ser,"FAVN?0")[:-1]
         avgModDict = {'0':"None", '1':"Vector", '2':"RMS", '3':"PeakHold"}
-        avgMode = avgModDict[gpibObj.query("FAVM?0")[:-1]]
+        avgMode = avgModDict[query(ser,"FAVM?0")[:-1]]
         winFuncDict = {'0':"Uniform", '1':"Flattop", '2':"Hanning", '3':"BMH",
                        '4':"Kaiser", '5':"Force/Exponential", '6':"User",
                        "[-T/2,T/2]":7, '8':"[0,T/2]", '9':"[-T/4,T/4]"}
-        windowFunc = winFuncDict[gpibObj.query('FWIN?0')[:-1]]
+        windowFunc = winFuncDict[query(ser,'FWIN?0')[:-1]]
 
         paramFile.write('# Start Frequency (Hz): '+startFreq+'\n')
         paramFile.write('# Frequency Span (Hz): '+spanFreq+'\n')
@@ -480,12 +526,12 @@ def writeParams(gpibObj, paramFile):
         paramFile.write('# Window function: '+windowFunc+'\n')
 
     elif measGrp[0] == 'Swept Sine':
-        startFreq = gpibObj.query('SSTR?0')[:-1]
-        stopFreq = gpibObj.query('SSTP?0')[:-1]
-        numOfPoints = gpibObj.query("SNPS?0")[:-1]
-        excAmp = gpibObj.query('SSAM?')[:-3]
-        settleCycles = gpibObj.query('SSCY?0')[:-1]
-        intCycles = gpibObj.query('SICY?0')[:-1]
+        startFreq = query(ser,'SSTR?0')[:-1]
+        stopFreq = query(ser,'SSTP?0')[:-1]
+        numOfPoints = query(ser,"SNPS?0")[:-1]
+        excAmp = query(ser,'SSAM?')[:-3]
+        settleCycles = query(ser,'SSCY?0')[:-1]
+        intCycles = query(ser,'SICY?0')[:-1]
 
         paramFile.write('# Start frequency (Hz) = '+startFreq+'\n')
         paramFile.write('# Stop frequency (Hz) = '+stopFreq+'\n')
@@ -546,7 +592,7 @@ def writeParams(gpibObj, paramFile):
     paramFile.write(']\n')
 
 
-def setParameters(gpibObj,params):
+def setParameters(ser,params):
     # Read dictionary of settings to set up the instrument
     print('Setting up parameters for the measurement...')
 
@@ -561,10 +607,10 @@ def setParameters(gpibObj,params):
             fRes=3 # Resolution is 800 points
 
         if params['dualChannel'].lower() == "dual":
-            gpibObj.command('DFMT1') # Dual display
+            send_command(ser,'DFMT1') # Dual display
             numDisp=2
         else:
-            gpibObj.command('DFMT0') # single display
+            send_command(ser,'DFMT0') # single display
             numDisp=1
 
         # Input Settings
@@ -572,89 +618,89 @@ def setParameters(gpibObj,params):
             icp1="1"
         else:
             icp1="0"
-        gpibObj.command('I1CP'+icp1) #CH1 Input Coupling
+        send_command(ser,'I1CP'+icp1) #CH1 Input Coupling
 
         if params['inputCoupling2'] == "AC":
             icp2="1"
         else:
             icp2="0"
-        gpibObj.command('I2CP'+icp2) #CH2 Input Coupling
+        send_command(ser,'I2CP'+icp2) #CH2 Input Coupling
 
         if params['inputGND1'] == "Float":
             igd1="0"
         else:
             igd1="1"
-        gpibObj.command('I1GD'+igd1) #CH1 Input GND
+        send_command(ser,'I1GD'+igd1) #CH1 Input GND
 
         if params['inputGND2'] == "Float":
             igd2="0"
         else:
             igd2="1"
-        gpibObj.command('I2GD'+igd2) #CH2 Input GND
+        send_command(ser,'I2GD'+igd2) #CH2 Input GND
 
-        gpibObj.command('A1RG0') #AutoRange Off
-        gpibObj.command('A2RG0') #AutoRange Off
+        send_command(ser,'A1RG0') #AutoRange Off
+        send_command(ser,'A2RG0') #AutoRange Off
         if params['arMode'] == "Tracking":
             arModeID='1'
         else:
             arModeID='0'
-        gpibObj.command('I1AR'+arModeID) #Auto Range Mode
-        gpibObj.command('I2AR'+arModeID) #Auto Range Mode
-        gpibObj.command('A1RG1') #AutoRange On
-        gpibObj.command('A2RG1') #AutoRange On
-        gpibObj.command('I1AF1') #Anti-Aliasing filter On
-        gpibObj.command('I2AF1') #Anti-Aliasing filter On
+        send_command(ser,'I1AR'+arModeID) #Auto Range Mode
+        send_command(ser,'I2AR'+arModeID) #Auto Range Mode
+        send_command(ser,'A1RG1') #AutoRange On
+        send_command(ser,'A2RG1') #AutoRange On
+        send_command(ser,'I1AF1') #Anti-Aliasing filter On
+        send_command(ser,'I2AF1') #Anti-Aliasing filter On
 
         if params['inputDiff1'] == "A":
             idf1="0"
         else:
             idf1="1"
-        gpibObj.command('I1MD'+idf1) #CH1 Input A-B = 1; A = 0
+        send_command(ser,'I1MD'+idf1) #CH1 Input A-B = 1; A = 0
 
         if params['inputDiff2'] == "A":
             idf1="0"
         else:
             idf1="1"
-        gpibObj.command('I2MD'+idf1) #CH2 Input A-B = 1; A = 0
+        send_command(ser,'I2MD'+idf1) #CH2 Input A-B = 1; A = 0
 
         # Set measurement type, displays
 
-        gpibObj.command('MGRP2,0') # Measurement Group = FFT
-        gpibObj.command('ISRC1')   # Input = Analog
+        send_command(ser,'MGRP2,0') # Measurement Group = FFT
+        send_command(ser,'ISRC1')   # Input = Analog
 
         if params['baseFreq'] == "102.4kHz":
-            gpibObj.command('FBAS2,1')  # Base Frequency = 102.4kHz
+            send_command(ser,'FBAS2,1')  # Base Frequency = 102.4kHz
         else:
-            gpibObj.command('FBAS2,0') # Base Frequency = 100.0kHz
+            send_command(ser,'FBAS2,0') # Base Frequency = 100.0kHz
 
         if  params['dataMode'] == "dbVrms/rtHz":
             for disp in range(numDisp):
-                gpibObj.command('UNDB'+str(disp)+','+str(1))   # dB ON
-                gpibObj.command('UNPK'+str(disp)+','+str(0))   # Vrms OFF
+                send_command(ser,'UNDB'+str(disp)+','+str(1))   # dB ON
+                send_command(ser,'UNPK'+str(disp)+','+str(0))   # Vrms OFF
         else:
             for disp in range(numDisp):
-                gpibObj.command('UNDB'+str(disp)+','+str(0))   # dB OFF
-                gpibObj.command('UNPK'+str(disp)+','+str(2))   # Vrms ON
+                send_command(ser,'UNDB'+str(disp)+','+str(0))   # dB OFF
+                send_command(ser,'UNPK'+str(disp)+','+str(2))   # Vrms ON
 
         for disp in range(numDisp):
-            gpibObj.command('ACTD'+str(disp)) # Change active display
-            gpibObj.command('MEAS'+str(disp)+','+str(disp)) # 0:FFT1, 1:FFT2
-            gpibObj.command('VIEW'+str(disp)+',0') #Log Magnitude
-            gpibObj.command('PSDU'+str(disp)+',1') # PSD ON
-            gpibObj.command('DISP'+str(disp)+',1') # Live display on
+            send_command(ser,'ACTD'+str(disp)) # Change active display
+            send_command(ser,'MEAS'+str(disp)+','+str(disp)) # 0:FFT1, 1:FFT2
+            send_command(ser,'VIEW'+str(disp)+',0') #Log Magnitude
+            send_command(ser,'PSDU'+str(disp)+',1') # PSD ON
+            send_command(ser,'DISP'+str(disp)+',1') # Live display on
 
-        gpibObj.command('FLIN2,'+str(fRes))     # Frequency resolution
-        gpibObj.command('FAVG2,1')              # Averaging On
+        send_command(ser,'FLIN2,'+str(fRes))     # Frequency resolution
+        send_command(ser,'FAVG2,1')              # Averaging On
 
         avgModDict = {"None":0, "Vector":1, "RMS":2, "PeakHold":3}
         if params['avgMode'] in avgModDict:
             avgModID=avgModDict[params['avgMode']]
         else:
             avgModID=2
-        gpibObj.command('FAVM2,'+str(avgModID)) # Averaging mode
-        gpibObj.command('FAVT2,0')            # Averaging Type = Linear
-        gpibObj.command('FREJ2,1')            # Overload Reject On
-        gpibObj.command('FAVN2,'+str(params['numAvg'])) # Number of Averaging
+        send_command(ser,'FAVM2,'+str(avgModID)) # Averaging mode
+        send_command(ser,'FAVT2,0')            # Averaging Type = Linear
+        send_command(ser,'FREJ2,1')            # Overload Reject On
+        send_command(ser,'FAVN2,'+str(params['numAvg'])) # Number of Averaging
         winFuncDict = {"Uniform":0, "Flattop":1, "Hanning":2, "BMH":3,
                        "Kaiser":4, "Force/Exponential":5, "User":6,
                        "[-T/2,T/2]":7,"[0,T/2]":8, "[-T/4,T/4]":9}
@@ -663,107 +709,125 @@ def setParameters(gpibObj,params):
             winFuncID=winFuncDict[params['windowFunc']]
         else:
             winFuncID=2
-        gpibObj.command('FWIN2,'+str(winFuncID))    # Window function
-        gpibObj.command('FSTR2,'+params['startFreq'])         # Start frequency
-        gpibObj.command('FSPN2,'+params['spanFreq'])          # Frequency span
+        send_command(ser,'FWIN2,'+str(winFuncID))    # Window function
+        send_command(ser,'FSTR2,'+params['startFreq'])         # Start frequency
+        send_command(ser,'FSPN2,'+params['spanFreq'])          # Frequency span
 
     elif params['measType'] == 'TF':
         # Make sure PSD units are off
-        psdOff(gpibObj)
+        psdOff(ser)
         # Input Settings
         if params['inputCoupling1'] == "AC":
             icp1="1"
         else:
             icp1="0"
-        gpibObj.command('I1CP'+icp1) #CH1 Input Coupling
+        send_command(ser,'I1CP'+icp1) #CH1 Input Coupling
 
         if params['inputCoupling2'] == "AC":
             icp2="1"
         else:
             icp2="0"
-        gpibObj.command('I2CP'+icp2) #CH2 Input Coupling
+        send_command(ser,'I2CP'+icp2) #CH2 Input Coupling
 
         if params['inputGND1'] == "Float":
             igd1="0"
         else:
             igd1="1"
-        gpibObj.command('I1GD'+igd1) #CH1 Input GND
+        send_command(ser,'I1GD'+igd1) #CH1 Input GND
 
         if params['inputGND2'] == "Float":
             igd2="0"
         else:
             igd2="1"
-        gpibObj.command('I2GD'+igd2) #CH2 Input GND
+        send_command(ser,'I2GD'+igd2) #CH2 Input GND
 
-        gpibObj.command('A1RG0') #AutoRange Off
-        gpibObj.command('A2RG0') #AutoRange Off
+        send_command(ser,'A1RG0') #AutoRange Off
+        send_command(ser,'A2RG0') #AutoRange Off
         if params['arMode'] == "Tracking":
             arModeID='1'
         else:
             arModeID='0'
-        gpibObj.command('I1AR'+arModeID) #Auto Range Mode
-        gpibObj.command('I2AR'+arModeID) #Auto Range Mode
-        gpibObj.command('A1RG1') #AutoRange On
-        gpibObj.command('A2RG1') #AutoRange On
-        gpibObj.command('I1AF1') #Anti-Aliasing filter On
-        gpibObj.command('I2AF1') #Anti-Aliasing filter On
+        send_command(ser,'I1AR'+arModeID) #Auto Range Mode
+        send_command(ser,'I2AR'+arModeID) #Auto Range Mode
+        send_command(ser,'A1RG1') #AutoRange On
+        send_command(ser,'A2RG1') #AutoRange On
+        send_command(ser,'I1AF1') #Anti-Aliasing filter On
+        send_command(ser,'I2AF1') #Anti-Aliasing filter On
 
         if params['inputDiff1'] == "A":
             idf1="0"
         else:
             idf1="1"
-        gpibObj.command('I1MD'+idf1) #CH1 Input A-B = 1; A = 0
+        send_command(ser,'I1MD'+idf1) #CH1 Input A-B = 1; A = 0
 
         if params['inputDiff2'] == "A":
             idf1="0"
         else:
             idf1="1"
-        gpibObj.command('I2MD'+idf1) #CH2 Input A-B = 1; A = 0
+        send_command(ser,'I2MD'+idf1) #CH2 Input A-B = 1; A = 0
 
         # Set measurement type, displays
 
-        gpibObj.command('DFMT1') # Dual display
-        gpibObj.command('ACTD0') # Active display 0
-        gpibObj.command('MGRP2,3') # Measurement Group = Swept Sine
-        gpibObj.command('MEAS2,47') # Frequency Resp
-        gpibObj.command('DISP0,1') # Live display on
-        gpibObj.command('DISP1,1') # Live display on
+        send_command(ser,'DFMT1') # Dual display
+        send_command(ser,'ACTD0') # Active display 0
+        send_command(ser,'MGRP2,3') # Measurement Group = Swept Sine
+        send_command(ser,'MEAS2,47') # Frequency Resp
+        send_command(ser,'DISP0,1') # Live display on
+        send_command(ser,'DISP1,1') # Live display on
         if params['integrate'].lower() == 'time':
-            gpibObj.command('SSTM2,'+str(params['settleTime'])) #Settle time
-            gpibObj.command('SITM2,'+str(params['intTime'])) #Integration Time
+            send_command(ser,'SSTM2,'+str(params['settleTime'])) #Settle time
+            send_command(ser,'SITM2,'+str(params['intTime'])) #Integration Time
         else:
-            gpibObj.command('SSCY2,'+str(params['settleCycles'])) # Settle cycles
-            gpibObj.command('SICY2,'+str(params['intCycles'])) # Integration cycles
-        gpibObj.command('SSTR2,'+params['startFreq']) #Start frequency
-        gpibObj.command('SSTP2,'+params['stopFreq']) #Stop frequency
-        gpibObj.command('SNPS2,'+str(params['numOfPoints'])) #Number of points
-        gpibObj.command('SRPT2,0') #Single shot mode
+            send_command(ser,'SSCY2,'+str(params['settleCycles'])) # Settle cycles
+            send_command(ser,'SICY2,'+str(params['intCycles'])) # Integration cycles
+        send_command(ser,'SSTR2,'+params['startFreq']) #Start frequency
+        send_command(ser,'SSTP2,'+params['stopFreq']) #Stop frequency
+        send_command(ser,'SNPS2,'+str(params['numOfPoints'])) #Number of points
+        send_command(ser,'SRPT2,0') #Single shot mode
         if params['sweepType'] == 'Linear':
             sweepTypeID='0'
         else:
             sweepTypeID='1'
-        gpibObj.command('SSTY2,'+sweepTypeID) # Sweep Type
-        gpibObj.command('SSAM'+params['excAmp']) #Source Amplitude
-        gpibObj.command('SOFF'+params['excOff']) #Source Offset
+        send_command(ser,'SSTY2,'+sweepTypeID) # Sweep Type
+        send_command(ser,'SSAM'+params['excAmp']) #Source Amplitude
+        send_command(ser,'SOFF'+params['excOff']) #Source Offset
 
         # Windowing
         #windowDict={'Uniform':0,'Flattop':1, 'Hanning':2, 'BMH':3, 'Kaiser':4,
         #            'Force/Exponential':5, 'User':6}
-        #gpibObj.command('FWIN0,'+windowDict[windowFunc])
+        #send_command(ser,'FWIN0,'+windowDict[windowFunc])
         # Set units
         if params['dataMode'] == "ReIm":
-            gpibObj.command('VIEW0,3') # Disp 0 = Real part
-            gpibObj.command('VIEW1,4') # Disp 1 = Imag part
-            gpibObj.command('UNDB0,0') # dB OFF
-            gpibObj.command('UNDB1,0') # dB OFF
+            send_command(ser,'VIEW0,3') # Disp 0 = Real part
+            send_command(ser,'VIEW1,4') # Disp 1 = Imag part
+            send_command(ser,'UNDB0,0') # dB OFF
+            send_command(ser,'UNDB1,0') # dB OFF
         else:
-            gpibObj.command('VIEW0,0') # Disp 0 = LogMag
-            gpibObj.command('VIEW1,5') # Dsip 1 = Phase
+            send_command(ser,'VIEW0,0') # Disp 0 = LogMag
+            send_command(ser,'VIEW1,5') # Dsip 1 = Phase
             if 'dB' in params['dataMode']:
-                gpibObj.command('UNDB0,1') # dB On
+                send_command(ser,'UNDB0,1') # dB On
             else:
-                gpibObj.command('UNDB0,0') # dB Off
-            gpibObj.command('UNDB1,0') # dB OFF
-            gpibObj.command('UNPH1,0') # Phase Unit deg.
+                send_command(ser,'UNDB0,0') # dB Off
+            send_command(ser,'UNDB1,0') # dB OFF
+            send_command(ser,'UNPH1,0') # Phase Unit deg.
     else:
         raise ValueError('Wrong measurement type entered in parameter file!')
+
+
+# Example usage
+def main():
+    try:
+        # Replace 'COM3' with your actual COM port
+        ser = connectRS232('COM3')
+        
+        # Perform operations...
+        reset(ser)
+        
+        # Close connection when done
+        ser.close()
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+if __name__ == "__main__":
+    main()
